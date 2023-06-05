@@ -11,12 +11,12 @@ if REGION is None:
     raise Exception('AWS_REGION not set')
 
 # keyed on stack name
-# values are a dict keyed on aws:cdk:path that contain the logical name
+# values are a dict keyed on aws:cdk:path that contain the physical name
 STACK_LOOKUP = {}
 
 def retrieve_attribute(stack_name, path):
     """Retrieve an attribute for a CloudFormation resource using boto."""
-    print('retrieve_attribute', stack_name, path)
+    #print('retrieve_attribute', stack_name, path)
 
     global STACK_LOOKUP
     if stack_name not in STACK_LOOKUP:
@@ -35,12 +35,13 @@ def retrieve_attribute(stack_name, path):
         for idn in ids:
             response = client.describe_stack_resource(StackName=stack_name, LogicalResourceId=idn)
             response = response['StackResourceDetail']
+            physicalId = response['PhysicalResourceId']
             if 'Metadata' in response:
                 response = json.loads(response['Metadata'])
                 if 'aws:cdk:path' in response:
                     path = response['aws:cdk:path']
-                    stack[path] = idn
-                    print(path, idn)
+                    stack[path] = physicalId
+                    #print(path, physicalId)
 
         # save
         STACK_LOOKUP[stack_name] = stack
