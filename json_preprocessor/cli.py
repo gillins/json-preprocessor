@@ -1,31 +1,67 @@
-import boto.cloudformation
+import os
+import boto3
 import click
 import json
-from urllib.parse import urldefrag, urlsplit
+import fnmatch
+from urllib.parse import urldefrag, urlsplit, urlparse
 from .resolution import resolve
 
+REGION = os.getenv('AWS_REGION')
+if REGION is None:
+    raise Exception('AWS_REGION not set')
 
-def retrieve_attribute(stack_name, logical_name, attribute, region):
+# keyed on stack name
+# values are a dict keyed on aws:cdk:path that contain the logical name
+STACK_LOOKUP = {}
+
+def retrieve_attribute(stack_name, path):
     """Retrieve an attribute for a CloudFormation resource using boto."""
+    print('retrieve_attribute', stack_name, path)
 
-    if region is None:
-        connection = boto.cloudformation.CloudFormationConnection()
+    global STACK_LOOKUP
+    if stack_name not in STACK_LOOKUP:
+        # hunt for it
+        client = boto3.client('cloudformation', region_name=REGION)
+
+        # get all the LogicalResourceId s
+        ids = []
+        paginator = client.get_paginator('list_stack_resources')
+        for res in paginator.paginate(StackName=stack_name):
+            for res2 in res['StackResourceSummaries']:
+                ids.append(res2['LogicalResourceId'])
+
+        stack = {}
+        # now find all the paths
+        for idn in ids:
+            response = client.describe_stack_resource(StackName=stack_name, LogicalResourceId=idn)
+            response = response['StackResourceDetail']
+            if 'Metadata' in response:
+                response = json.loads(response['Metadata'])
+                if 'aws:cdk:path' in response:
+                    path = response['aws:cdk:path']
+                    stack[path] = idn
+                    print(path, idn)
+
+        # save
+        STACK_LOOKUP[stack_name] = stack
+
+    stack = STACK_LOOKUP[stack_name]
+
+    has_wildcards = '*' in path or '?' in path or '[' in path
+    if has_wildcards:
+        result = []
+        for candidate in stack:
+            if fnmatch.fnmatch(candidate, path):
+                result.append(stack[candidate])
+        if len(result) == 0:
+            raise Exception("pattern {} not found in stack {}".format(path, stack_name))
+        return result
+
     else:
-        connection = boto.cloudformation.connect_to_region(region)
-
-    response = connection.describe_stack_resource(stack_name, logical_name)
-
-    # Unwrap DescribeStackResourceResponse
-    dsr_response = response["DescribeStackResourceResponse"]
-
-    # Unwrap DescribeStackResourceResult
-    dsr_result = dsr_response["DescribeStackResourceResult"]
-
-    # Unwrap StackResourceDetail
-    sr_detail = dsr_result["StackResourceDetail"]
-
-    return sr_detail[attribute]
-
+        if path in stack:
+            return stack[path]
+        else:
+            raise Exception('path {} not found in stack {}'.format(path, stack_name))
 
 def parse_cfn_uri(uri):
     """Parse a URI of the form:
@@ -38,71 +74,27 @@ def parse_cfn_uri(uri):
     """
 
     # Deconstruct URI
-    base_uri, frag = urlparse.urldefrag(uri)
-    base_uri_parts = urlparse.urlsplit(base_uri)
+    base_uri, frag = urldefrag(uri)
+    base_uri_parts = urlsplit(base_uri)
     scheme = base_uri_parts.scheme
 
     # Check URI scheme
     if scheme != "cfn":
         raise Exception("Scheme '" + scheme + "' not supported.")
 
-    # Parse netloc section
-    netloc_parts = base_uri_parts.netloc.split("@")
-    if len(netloc_parts) > 2:
-        raise Exception("URI contains unexpected components in net " +
-                        "location '" + base_uri_parts.netloc + "'.")
-    elif len(netloc_parts) >= 1:
-        stack_name = netloc_parts[0]
-        if len(netloc_parts) == 2:
-            region = netloc_parts[1]
-        else:
-            region = None
-    else:
-        raise Exception('URI is missing stack name.')
-
-    # Parse path section
-    path_parts = base_uri_parts.path.strip("/").split('/')
-    if len(path_parts) > 2:
-        raise Exception("URI contains unexpected components in query " +
-                        "path '" + base_uri_parts.path + "'.")
-    elif len(path_parts) >= 1:
-        logical_name = path_parts[0]
-        if len(path_parts) == 2:
-            attribute = path_parts[1]
-        else:
-            attribute = None
-    else:
-        raise Exception("URI is missing logical name for stack resource.")
-
-    return stack_name, logical_name, attribute, region
-
+    return base_uri_parts.netloc, base_uri_parts.netloc + base_uri_parts.path
 
 def handle_cfn_uri(uri):
     """Retrieve a stack resource attribute for a CloudFormation resource
        identified by a URI of the form:
 
-       cfn://<stack-name>[@region]/<logical-name>[/[attribute]]
-
-       [] denote optional components, whereas <> denotes mandatory components.
-
-       If any mandatory components are missing, an exception will be raised.
-
-       If [region] is omitted, then the region will be determined using the
-       current user's AWS credentials. If [region] is present, but not
-       recognised by boto, an exception may be raised.
-
-       [attribute] may be any attribute that can be returned by the retrieval
-       function. If [attribute] is omitted, the 'PhysicalResourceID' attribute
-       will be returned.
+       cfn://cdk_path
     """
 
     # Parse the URI
-    stack_name, logical_name, attribute, region = parse_cfn_uri(uri)
+    stack_name, path = parse_cfn_uri(uri)
 
-    if attribute is None:
-        attribute = 'PhysicalResourceID'
-
-    return retrieve_attribute(stack_name, logical_name, attribute, region)
+    return retrieve_attribute(stack_name, path)
 
 
 def resolve_template_with_cfn_support(template_data, params):
@@ -130,7 +122,7 @@ parameter_help_text = 'A key-value pair to be passed to the template; ' \
                       'this option may be used more than once to pass in ' \
                       'multiple key-value pairs.'
 
-
+"""
 @click.group(no_args_is_help=True,
              invoke_without_command=True)
 @click.option('--minify',
@@ -150,6 +142,7 @@ parameter_help_text = 'A key-value pair to be passed to the template; ' \
 @click.argument('path-to-document',
                 metavar='<path-to-document>',
                 type=click.Path(exists=True))
+"""
 def run(minify, output_file, parameter, path_to_document):
     """Resolve a CloudFormation template containing JSON pre-processor
        directives.
