@@ -1,6 +1,6 @@
 import os
 import boto3
-import click
+#import click
 import json
 import fnmatch
 from urllib.parse import urldefrag, urlsplit, urlparse
